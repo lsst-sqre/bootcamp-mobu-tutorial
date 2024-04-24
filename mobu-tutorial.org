@@ -1,0 +1,196 @@
+#+OPTIONS: toc:nil num:nil
+#+REVEAL_ROOT: https://cdn.jsdelivr.net/npm/reveal.js@3.9.2
+#+REVEAL_HLEVEL: 2
+#+REVEAL_THEME: white
+#+REVEAL_EXTRA_CSS: ./local.css
+#+REVEAL_INIT_OPTIONS: slideNumber: h/v
+#+REVEAL_PLUGINS: (highlight)
+#+AUTHOR: Adam Thornton
+#+EMAIL: athornton@lsst.org
+#+TITLE: Using Mobu to test Phalanx Services
+
+* Using Mobu to test Phalanx Services
+
+This is intended as a short guide to creating a test Python notebook to be run under [[https://github.com/lsst-sqre/mobu][Mobu]].
+
+It assumes that the service under test is a FastAPI service designed to run in [[https://phalanx.lsst.io][Phalanx]].
+
+** What's Mobu?
+
+[[https://github.com/lsst-sqre/mobu][Mobu]] is our framework for an automated test harness for Phalanx.
+
+"Mobu" is a contraction of "Monkey Business"; this in turn is a nod to
+[[https://netflix.github.io/chaosmonkey/][Chaos Monkey]], a Netflix testing framework.
+
+** Monkey Flocks
+
+Each thread of testing execution, roughly speaking, is a Monkey.  Monkeys
+come in Flocks.
+
+[[./assets/351px-BauW170B.jpg]]
+# Image: W.W. Denslow, 1900, public domain
+
+** What does Mobu do?
+
+Mobu runs zero or more Flocks, repeatedly, and reports errors from its
+runs (usually via Slack).
+
+Mobu is part of Phalanx and will normally have been configured with a
+Slack Channel and appropriate webhooks for a particular Phalanx
+deployment by that deployment's administrators.
+
+All you should have to do is write the content that a Flock will execute
+and add that to Mobu's autostart configuration.
+
+** Flock Types
+
+Flocks can be of many types: some can run notebooks, some can perform TAP
+queries, some exercise GitLFS, etc.
+
+We will only be considering the NotebookRunner type today.
+
+The NotebookRunner is generally the easiest to work with.
+
+** NotebookRunner
+
+A NotebookRunner is defined by two main parameters:
+
+ * The URL of the Git repository where the notebooks to be run reside
+ * The branch to use when running those notebooks
+
+All Python notebooks in the root directory of that repository will be run.
+
+*** Python Execution Context
+
+Mobu runs Python within the context of a Jupyter Notebook running in
+[[https://nublado.lsst.io/][Nublado]].
+
+That notebook will be run as a particular user known to Gafaelfawr, and
+will have the usual set of filesystems mounted.
+
+This implies that any services and Python modules available in the
+Python kernel for that instance are present.
+
+In general, though, you don't need the full range of DM Stack capabilities to
+test your Phalanx Services.
+
+*** What do you need?
+
+Phalanx FastAPI services are REST HTTP APIs that return JSON.  So what
+you need is:
+
+ * knowledge of the service endpoint
+ * an HTTP client
+ * a token authenticating you to the service
+
+*** What does this look like?
+
+You will be performing an end-to-end test of your service.
+
+This will fundamentally look very much like the external handler unit
+tests for that service, because that's all you're really doing: you're
+hitting an endpoint which is routed through an external handler.
+
+** Working Example
+
+We're going to be using Jonathan's
+[[https://github.com/lsst-sqre/fastapi-bootcamp][FastAPI Bootcamp Astroplan]] application for this example.
+
+*** Determine the API
+
+If you've used the SQuaRE application templates, your FastAPI service
+will have documentation under its =/redoc= endpoint.
+
+In our case, that means that the URL relative to the Phalanx base URL
+must be =/fastapi-bootcamp/redoc=.
+
+*** Leverage Nublado
+
+Nublado provides conveniences to its users.  The ones we care about here
+are:
+
+ * The base URL of the Phalanx installation is available as
+   =$EXTERNAL_INSTANCE_URL= (or as the contents of
+   =/opt/lsst/software/jupyterlab/environment/EXTERNAL_INSTANCE_URL=)
+ * A Gafaelfawr token for the current user is available in
+   =/opt/lsst/software/jupyterlab/secrets/token=
+
+The =httpx= module is present by default and is generally what I prefer
+to use for an HTTP client.  =requests= and =aiohttp= are also installed.
+
+*** Get started: create an HTTP client
+
+#+NAME: httpx_client
+#+BEGIN_SRC python
+import httpx
+from pathlib import Path
+
+# Set up our session headers
+svc_endpoint="/fastapi-bootcamp"
+jl_dir=Path("/opt/lsst/software/jupyterlab")
+tok = (jl_dir / "secrets" / token).read_text().strip()
+inst_url = (jl_dir / "environment" / "EXTERNAL_INSTANCE_URL").read_text().strip()
+http_headers = { "Authorization": f"Bearer {tok}",
+                 "Content-Type": "application/json"
+               }
+svc_root = f"{inst_url}{svc_endpoint}"
+http_client = httpx.AsyncClient(
+                  follow_redirects=True,
+                  base_url=svc_root,
+                  headers=http_headers
+              )
+#+END_SRC
+
+*** Now put the two together
+
+For each method in the API, make a request to that endpoint.  Check
+whether the response is what you expect.  =assert()= is perfect for
+this, because you do indeed want to raise an exception if something goes
+wrong.
+
+That's your notebook done.
+
+** Configure Mobu
+
+First you will get Mobu running your new flock by hand; then you will
+configure Mobu to autostart that flock when it begins running.
+
+*** Add a flock manually
+
+The Mobu =redoc= page will show you what you need.  As it turns out, you
+need to send a =PUT= request with a JSON body.
+#+NAME: test_flock
+#+BEGIN_SRC json
+{
+  "name": "fastapi-bootcamp",
+  "count": 1,
+  "users": [ { "username": "bot-mobu-fastapi-bootcamp" } ],
+  "scopes": [ "exec:notebook" ],
+  "business": {
+    "type": "NotebookRunner",
+    "options": {
+      "repo_url": "https://github.com/lsst-sqre/system-test.git",
+      "repo_branch": "square-bootcamp"
+    },
+    "restart": true
+}
+#+END_SRC
+
+*** Test the flock
+
+Sending that HTTP =PUT= will start the flock.  As long as Mobu is
+configured correctly at the site (which is not your responsibility)
+errors will be reported in the site's Slack status channel.
+
+*** Iterating
+
+Sending an HTTP =DELETE= to =/mobu/flocks/<name>= will remove the flock,
+so you can tweak its behavior.
+
+*** Add the flock to Phalanx ***
+
+When you're sure that the notebook is doing what you intended, you can
+add the flock to the site's Phalanx configuration.
+
+Create a PR to add the YAML representation of the flock you just tested
+to [[https://github.com/lsst-sqre/phalanx/tree/main/applications/mobu][Mobu]] in the site-specific values YAML file under the "autostart" key.
