@@ -300,3 +300,17 @@ This presentation:
 https://github.com/lsst-sqre/bootcamp-mobu-tutorial.git
 
 [[./assets/qr-code.png]]
+
+** TODO
+
+Notebook only one currently mature enough for primetime
+
+Picture of Slack alerts
+
+List of running flocks
+
+curl for POST
+
+system-test, named after the service it's testing
+
+monkeyflocker!
